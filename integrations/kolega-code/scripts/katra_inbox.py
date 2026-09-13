@@ -218,10 +218,19 @@ def is_skippable(msg: dict) -> bool:
 
 
 def target_is_me(text: str) -> bool:
-    m = ATTN_RE.search(text or "")
-    if not m:
-        return False
-    return m.group(1).lower() in MY_NAMES
+    """Primary-header match ONLY: the message's first non-empty line must
+    be its own 'Attention: X' header. Quoted/embedded 'Attention:' lines
+    further down the body (forwarded chains, issue reports) must never
+    redirect the message into another agent's loop — 2026-09-13: the
+    lilly/zefir loops re-listed Shoshin's and Lilly's FOR:Satori messages
+    because their bodies quoted other agents' headers."""
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        m = ATTN_RE.match(line)
+        return bool(m) and m.group(1).lower() in MY_NAMES
+    return False
 
 
 def pending(state: dict, include_old: bool = False) -> list[dict]:

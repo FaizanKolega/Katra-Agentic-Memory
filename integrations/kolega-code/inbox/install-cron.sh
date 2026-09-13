@@ -25,7 +25,7 @@ crontab -l 2>/dev/null | grep -v "katra_inbox.py dispatch" > /tmp/cron.base || t
   cat /tmp/cron.base
   cat <<CRON
 # katra inbox auto-reply loop — full capability (operator-approved 2026-09-09)
-*/3 * * * * KATRA_AGENT_ID=$LOCAL_ID KATRA_INBOX_DIR=$LOCAL_DIR KATRA_HOST=localhost /usr/bin/python3 $SCRIPT dispatch >> $LOG_DIR/cron.log 2>&1
+*/3 * * * * KATRA_AGENT_ID=$LOCAL_ID KATRA_AGENT_NAMES=$LOCAL_ID KATRA_INBOX_DIR=$LOCAL_DIR KATRA_HOST=localhost /usr/bin/python3 $SCRIPT dispatch >> $LOG_DIR/cron.log 2>&1
 CRON
   for id in $(echo "$EXTRA_LOOPS" | tr ',' ' '); do
     [ -z "$id" ] && continue
