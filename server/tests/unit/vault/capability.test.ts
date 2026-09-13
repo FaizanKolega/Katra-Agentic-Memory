@@ -867,6 +867,30 @@ describe.skipIf(!mongoAvailable)('vault capability core (F7) — contract criter
     expect(JSON.stringify(rows[0])).not.toContain(SECRET_VALUE);
   });
 
+  it('instagramLogin: driver failure taxonomy passes through (class + sanitized message, no secret)', async () => {
+    await grant('agent-c', 'instagram');
+    const secretId = await putSecretFor('agent-c', 'igtaxonomy');
+    const loginFn = vi.fn(async () => ({
+      ok: false,
+      class: 'CheckpointRequired',
+      message: 'checkpoint_required: verify your account to log in',
+    }));
+    const cap = createCapability({ store, instagramLoginFn: loginFn });
+
+    const result = await cap.instagramLogin({
+      caller: AGENT_C,
+      secretId,
+      service: 'instagram',
+      username: 'katra5432',
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.blocked?.reason).toBe('instagram login failed');
+    expect(result.class).toBe('CheckpointRequired');
+    expect(result.message).toContain('checkpoint_required');
+    expect(JSON.stringify(result)).not.toContain(SECRET_VALUE);
+  });
+
   it('instagramLogin: invalid username (empty/multiline) → denied invalid username', async () => {
     await grant('agent-c', 'instagram');
     const secretId = await putSecretFor('agent-c', 'igsecret4');

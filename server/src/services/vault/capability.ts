@@ -134,6 +134,11 @@ export interface InstagramLoginResult {
   csrftoken?: string;
   /** Full instagrapi settings JSON (session reuse material). */
   session?: string;
+  /** Driver failure taxonomy (value-free w.r.t. the secret): raw exception
+   *  class name (e.g. 'CheckpointRequired', 'UnknownError') and the
+   *  sanitized IG message (bounded, password-redacted). */
+  class?: string;
+  message?: string;
 }
 
 /** Shape the injectable driver returns (or the default HTTP driver). */
@@ -144,6 +149,8 @@ export interface InstagramDriverOutcome {
   csrftoken?: string;
   session?: string;
   error?: string;
+  class?: string;
+  message?: string;
 }
 
 export interface CapabilityOptions {
@@ -753,8 +760,24 @@ export function createCapability(opts: CapabilityOptions = {}): Capability {
           session: outcome.session,
         });
 
+        // Value-free failure taxonomy passthrough (Lilly 2026-09-13): the
+        // driver's exception class + sanitized IG message let the caller
+        // tell checkpoint / challenge / rate-limit apart. Bounded defensively
+        // here too; never secret material.
+        const failureInfo = (outcome?: InstagramDriverOutcome | null): Pick<InstagramLoginResult, 'class' | 'message'> => {
+          const klass =
+            typeof outcome?.class === 'string' ? outcome.class.slice(0, 80) : undefined;
+          const message =
+            typeof outcome?.message === 'string' ? outcome.message.slice(0, 240) : undefined;
+          return {
+            ...(klass ? { class: klass } : {}),
+            ...(message ? { message } : {}),
+          };
+        };
+
         // 1 ── Session reuse first: rehydrate without touching the password.
         if (hasSession) {
+          let reuseOutcome: InstagramDriverOutcome | undefined;
           try {
             const reused = await callDriver({
               username: input.username,
@@ -763,13 +786,18 @@ export function createCapability(opts: CapabilityOptions = {}): Capability {
             if (reused && reused.ok === true) {
               return finish('ok', buildResult(reused));
             }
+            reuseOutcome = reused ?? undefined;
           } catch {
             /* fall through to the password path when a secret is available */
           }
           if (!hasSecretId) {
             return finish(
               'error',
-              blocked('session expired and no secret available'),
+              {
+                ok: false,
+                blocked: { reason: 'session expired and no secret available' },
+                ...failureInfo(reuseOutcome),
+              },
               'session expired and no secret available',
             );
           }
@@ -790,7 +818,15 @@ export function createCapability(opts: CapabilityOptions = {}): Capability {
             password: secret,
           });
           if (!outcome || outcome.ok !== true) {
-            return finish('error', blocked('instagram login failed'), 'instagram login failed');
+            return finish(
+              'error',
+              {
+                ok: false,
+                blocked: { reason: 'instagram login failed' },
+                ...failureInfo(outcome),
+              },
+              'instagram login failed',
+            );
           }
           return finish('ok', buildResult(outcome));
         } catch {

@@ -31,11 +31,38 @@ if not TOKEN:
 
 try:
     from instagrapi import Client  # type: ignore
+    from instagrapi import exceptions as ig_exc  # type: ignore
 except ImportError:
     print("ig_login_driver: instagrapi is required — pip install instagrapi", file=sys.stderr)
     sys.exit(1)
 
 MAX_BODY = 16 * 1024
+
+# ── Failure classification (value-free w.r.t. the secret) ─────────────────
+# The exception TEXT is Instagram's own message — it never contains the
+# password. We sanitize (newlines collapsed, bounded, password substring
+# redacted defensively) and return {error: static code, class: raw name,
+# message: sanitized text} so checkpoint / challenge / bad-password /
+# rate-limit are distinguishable without guessing at 'UnknownError'.
+def describe_failure(exc: BaseException, password: str = "") -> dict:
+    name = exc.__class__.__name__
+    lowered = name.lower()
+    if "badpassword" in lowered or lowered == "userauthfail":
+        code = "bad_password"
+    elif "checkpoint" in lowered:
+        code = "checkpoint_required"
+    elif "challenge" in lowered or "twofactor" in lowered or "2fa" in lowered:
+        code = "challenge_required"
+    elif "timeout" in lowered or isinstance(exc, TimeoutError):
+        code = "timeout"
+    elif "pleasewait" in lowered or "throttl" in lowered or "ratelimit" in lowered:
+        code = "rate_limit"
+    else:
+        code = "login_failed"
+    message = " ".join(str(exc).split())[:240]
+    if password:
+        message = message.replace(password, "***")
+    return {"error": code, "class": name, "message": message}
 
 
 def do_login(username: str, password: str) -> dict:
@@ -137,13 +164,31 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     self._send(200, do_reuse(username, str(session_json)))
                     return
-                except Exception:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001
                     if password is None:
-                        self._send(401, {"ok": False, "error": "session expired"})
+                        info = describe_failure(exc, "")
+                        print(
+                            f"ig_login_driver: session reuse failed "
+                            f"class={info['class']} message={info['message']}",
+                            file=sys.stderr, flush=True,
+                        )
+                        self._send(401, {
+                            "ok": False,
+                            "error": "session_expired",
+                            **info,
+                        })
                         return
             self._send(200, do_login(username, str(password)))
-        except Exception:  # noqa: BLE001 - static failure text only
-            self._send(502, {"ok": False, "error": "login failed"})
+        except Exception as exc:  # noqa: BLE001 - value-free taxonomy
+            info = describe_failure(exc, str(password) if password is not None else "")
+            # Server-side journal: class + sanitized IG message (the error
+            # text is NOT the secret and never contains it).
+            print(
+                f"ig_login_driver: login failed class={info['class']} "
+                f"message={info['message']}",
+                file=sys.stderr, flush=True,
+            )
+            self._send(502, {"ok": False, **info})
 
     def log_message(self, *args) -> None:  # silence access logs (bodies never logged)
         return
