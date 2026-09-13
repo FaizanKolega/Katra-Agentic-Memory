@@ -51,18 +51,40 @@ def do_login(username: str, password: str) -> dict:
         # The session the client holds is what we surface; drop the password
         # reference as soon as the login call returns or raises.
         del password
+    return session_material(client)
+
+
+def session_material(client: Client) -> dict:
+    """Session material only — the password is never part of this shape."""
     session = getattr(client, "sessionid", None)
     csrf = getattr(client, "csrf_token", None) or (
         getattr(client, "private", None)
         and getattr(client.private, "csrf_token", None)
     )
     user_id = getattr(client, "user_id", None)
+    try:
+        settings_json = json.dumps(client.get_settings())
+    except Exception:  # noqa: BLE001 - best effort; login path still usable
+        settings_json = None
     return {
         "ok": True,
         "userIdPk": str(user_id) if user_id is not None else None,
         "sessionid": session,
         "csrftoken": csrf,
+        "session": settings_json,
     }
+
+
+def do_reuse(username: str, session_json: str) -> dict:
+    """Rehydrate a saved instagrapi settings JSON and verify it works.
+
+    No password is involved anywhere on this path.
+    """
+    client = Client()
+    client.set_settings(json.loads(session_json))
+    # Verify the session actually works before handing it back.
+    client.get_timeline_feed()
+    return session_material(client)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -97,16 +119,29 @@ class Handler(BaseHTTPRequestHandler):
                 return
             body = json.loads(self.rfile.read(length).decode("utf-8"))
             username = str(body.get("username") or "")
-            password = str(body.get("password") or "")
-            if not username or not password or len(username) > 128:
+            password = body.get("password")
+            session_json = body.get("session")
+            if not username or len(username) > 128:
+                self._send(400, {"ok": False, "error": "invalid body"})
+                return
+            if password is None and session_json is None:
                 self._send(400, {"ok": False, "error": "invalid body"})
                 return
         except (ValueError, UnicodeDecodeError):
             self._send(400, {"ok": False, "error": "invalid body"})
             return
         try:
-            result = do_login(username, password)
-            self._send(200, result)
+            if session_json is not None:
+                # Reuse path: verify the saved session; fall back to a fresh
+                # password login when the session has expired.
+                try:
+                    self._send(200, do_reuse(username, str(session_json)))
+                    return
+                except Exception:  # noqa: BLE001
+                    if password is None:
+                        self._send(401, {"ok": False, "error": "session expired"})
+                        return
+            self._send(200, do_login(username, str(password)))
         except Exception:  # noqa: BLE001 - static failure text only
             self._send(502, {"ok": False, "error": "login failed"})
 

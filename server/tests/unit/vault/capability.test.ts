@@ -97,8 +97,9 @@ describe('vault capability — MCP + REST wiring (criterion 10)', () => {
     expect(MCP_SERVER_SOURCE).toMatch(/body_template: z\.string\(\)\.optional\(\)/);
     expect(MCP_SERVER_SOURCE).toMatch(/headers: z\.record\(z\.string\(\), z\.string\(\)\)\.optional\(\)/);
     // Typed Instagram-login tool (2026-09-12).
-    expect(MCP_SERVER_SOURCE).toMatch(/const VaultInstagramLoginInput = z\.object\(\{[\s\S]*secret_id: z\.string\(\)\.min\(1\)/);
+    expect(MCP_SERVER_SOURCE).toMatch(/const VaultInstagramLoginInput = z\.object\(\{[\s\S]*secret_id: z\.string\(\)\.min\(1\)\.optional\(\)/);
     expect(MCP_SERVER_SOURCE).toMatch(/username: z\.string\(\)\.min\(1\)\.max\(128\)/);
+    expect(MCP_SERVER_SOURCE).toMatch(/session: z\.string\(\)\.optional\(\)/);
     expect(MCP_SERVER_SOURCE).toMatch(
       /export async function handleVaultInstagramLogin\(args: unknown\): Promise<TextContent\[\]>/,
     );
@@ -881,6 +882,99 @@ describe.skipIf(!mongoAvailable)('vault capability core (F7) — contract criter
 
     expect(result.ok).toBe(false);
     expect(result.blocked?.reason).toBe('invalid username');
+    expect(loginFn).not.toHaveBeenCalled();
+  });
+
+  it('instagramLogin: session reuse — driver rehydrates without the password; result carries the fresh session JSON', async () => {
+    await grant('agent-c', 'instagram');
+    let seenArgs: { username: string; password?: string; session?: string } | undefined;
+    const loginFn = vi.fn(async (args) => {
+      seenArgs = args;
+      return { ok: true, userIdPk: '12345678', sessionid: 'reused-session', csrftoken: 'reused-csrf', session: '{"authorization_data":"rehydrated"}' };
+    });
+    const cap = createCapability({ store, instagramLoginFn: loginFn });
+
+    // No secret is created or opened on the reuse path.
+    const result = await cap.instagramLogin({
+      caller: AGENT_C,
+      service: 'instagram',
+      username: 'katra5432',
+      session: '{"authorization_data":"saved-session"}',
+    });
+
+    expect(seenArgs?.username).toBe('katra5432');
+    expect(seenArgs?.session).toBe('{"authorization_data":"saved-session"}');
+    expect(seenArgs?.password).toBeUndefined();
+    expect(result.ok).toBe(true);
+    expect(result.session).toBe('{"authorization_data":"rehydrated"}');
+    expect(result.sessionid).toBe('reused-session');
+    const rows = (await db
+      .collection('vault_audit')
+      .find({ action: 'instagram_login', actor: 'agent-c' }, { projection: { _id: 0 } })
+      .sort({ at: -1 })
+      .limit(1)
+      .toArray()) as unknown as Array<Record<string, unknown>>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0].outcome).toBe('ok');
+    expect(JSON.stringify(rows[0])).not.toContain(SECRET_VALUE);
+  });
+
+  it('instagramLogin: expired session falls back to a fresh password login when secret_id is present', async () => {
+    await grant('agent-c', 'instagram');
+    const secretId = await putSecretFor('agent-c', 'igfallback');
+    const calls: Array<Record<string, string | undefined>> = [];
+    const loginFn = vi.fn(async (args) => {
+      calls.push(args);
+      if (args.session !== undefined) return { ok: false, error: 'session expired' };
+      return { ok: true, userIdPk: '1', sessionid: 'fresh-session', csrftoken: 'fresh-csrf' };
+    });
+    const cap = createCapability({ store, instagramLoginFn: loginFn });
+
+    const result = await cap.instagramLogin({
+      caller: AGENT_C,
+      secretId,
+      service: 'instagram',
+      username: 'katra5432',
+      session: '{"authorization_data":"stale"}',
+    });
+
+    expect(calls).toHaveLength(2);
+    expect(calls[0].session).toBe('{"authorization_data":"stale"}');
+    expect(calls[0].password).toBeUndefined();
+    expect(calls[1].password).toBe(SECRET_VALUE);
+    expect(result.ok).toBe(true);
+    expect(result.sessionid).toBe('fresh-session');
+  });
+
+  it('instagramLogin: expired session without secret_id → blocked static reason', async () => {
+    await grant('agent-c', 'instagram');
+    const loginFn = vi.fn(async () => ({ ok: false, error: 'session expired' }));
+    const cap = createCapability({ store, instagramLoginFn: loginFn });
+
+    const result = await cap.instagramLogin({
+      caller: AGENT_C,
+      service: 'instagram',
+      username: 'katra5432',
+      session: '{"authorization_data":"stale"}',
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.blocked?.reason).toBe('session expired and no secret available');
+  });
+
+  it('instagramLogin: neither session nor secret_id → denied session or secret_id required', async () => {
+    await grant('agent-c', 'instagram');
+    const loginFn = vi.fn(async () => ({ ok: true }));
+    const cap = createCapability({ store, instagramLoginFn: loginFn });
+
+    const result = await cap.instagramLogin({
+      caller: AGENT_C,
+      service: 'instagram',
+      username: 'katra5432',
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.blocked?.reason).toBe('session or secret_id required');
     expect(loginFn).not.toHaveBeenCalled();
   });
 

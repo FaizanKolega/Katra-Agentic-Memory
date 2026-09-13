@@ -109,12 +109,18 @@ export interface CapabilityResult {
  *  logs, or audit rows. Only derived session material is returned. */
 export interface InstagramLoginInput {
   caller: CallerIdentity;
-  /** Full secret_id holding the IG account password. */
-  secretId: string;
+  /** Full secret_id holding the IG account password. Required for a fresh
+   *  login; optional when `session` is supplied for reuse (fallback). */
+  secretId?: string;
   /** Approval service name (e.g. 'Instagram katra account'). */
   service: string;
   /** IG account username (e.g. 'katra5432') — plaintext by design. */
   username: string;
+  /** Optional previously-saved instagrapi settings JSON (session reuse).
+   *  When present the driver rehydrates the client without the password;
+   *  if reuse fails and `secretId` is set, the driver falls back to a
+   *  fresh password login. */
+  session?: string;
 }
 
 export interface InstagramLoginResult {
@@ -126,6 +132,8 @@ export interface InstagramLoginResult {
   userIdPk?: string;
   sessionid?: string;
   csrftoken?: string;
+  /** Full instagrapi settings JSON (session reuse material). */
+  session?: string;
 }
 
 /** Shape the injectable driver returns (or the default HTTP driver). */
@@ -134,6 +142,7 @@ export interface InstagramDriverOutcome {
   userIdPk?: string;
   sessionid?: string;
   csrftoken?: string;
+  session?: string;
   error?: string;
 }
 
@@ -150,7 +159,8 @@ export interface CapabilityOptions {
    *  driver POSTing to the operator-configured IG_DRIVER_URL endpoint. */
   instagramLoginFn?: (args: {
     username: string;
-    password: string;
+    password?: string;
+    session?: string;
   }) => Promise<InstagramDriverOutcome>;
 }
 
@@ -191,27 +201,35 @@ function igDriverUrl(): string {
 }
 
 /**
- * Default instagrapi login driver: POSTs {username, password} to the
- * operator-configured IG_DRIVER_URL (token-gated with IG_DRIVER_TOKEN).
- * The password travels ONLY over this operator-controlled hop, server to
- * server — never through results, logs, or caller contexts.
+ * Default instagrapi login driver: POSTs {username, password?} (or
+ * {username, session} for reuse) to the operator-configured IG_DRIVER_URL
+ * (token-gated with IG_DRIVER_TOKEN). The password travels ONLY over this
+ * operator-controlled hop, server to server — never through results, logs,
+ * or caller contexts.
  */
 function defaultInstagramLoginFn(
   fetchImpl: typeof fetch,
-): (args: { username: string; password: string }) => Promise<InstagramDriverOutcome> {
+): (args: {
+  username: string;
+  password?: string;
+  session?: string;
+}) => Promise<InstagramDriverOutcome> {
   return async (args): Promise<InstagramDriverOutcome> => {
     const url = igDriverUrl();
     if (!url) {
       throw new Error('instagram driver not configured');
     }
     const token = process.env.IG_DRIVER_TOKEN ?? '';
+    const body: Record<string, string> = { username: args.username };
+    if (args.password !== undefined) body.password = args.password;
+    if (args.session !== undefined) body.session = args.session;
     const response = await fetchImpl(url, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
         ...(token ? { authorization: `Bearer ${token}` } : {}),
       },
-      body: JSON.stringify({ username: args.username, password: args.password }),
+      body: JSON.stringify(body),
     });
     if (!response.ok) {
       throw new Error('instagram driver rejected the request');
@@ -667,7 +685,7 @@ export function createCapability(opts: CapabilityOptions = {}): Capability {
             at: auditAt,
             actor,
             action: 'instagram_login',
-            secret_id: input.secretId,
+            secret_id: input.secretId ?? '',
             service: input.service,
             outcome,
             ...(errorText !== undefined ? { error: errorText } : {}),
@@ -686,8 +704,18 @@ export function createCapability(opts: CapabilityOptions = {}): Capability {
         ) {
           return finish('denied', blocked('invalid username'));
         }
-        if (!input.secretId || input.secretId.length === 0 || !input.service) {
+        const hasSession =
+          typeof input.session === 'string' && input.session.length > 0;
+        const hasSecretId =
+          typeof input.secretId === 'string' && input.secretId.length > 0;
+        if (!input.service || input.service.length === 0) {
           return finish('denied', blocked('invalid capability request'));
+        }
+        if (!hasSession && !hasSecretId) {
+          return finish(
+            'denied',
+            blocked('session or secret_id required'),
+          );
         }
 
         // Approval gate FIRST — identical to vaultHttp.
@@ -700,19 +728,14 @@ export function createCapability(opts: CapabilityOptions = {}): Capability {
           return finish('denied', blocked('no active approval'));
         }
 
-        // RBAC: open the password server-side; it never leaves this scope
-        // except into the driver call.
-        let secret: string;
-        try {
-          secret = await store.openSecretValue(input.caller, input.secretId);
-        } catch {
-          return finish('denied', blocked('secret not available'));
-        }
-
         const driver = opts.instagramLoginFn ?? defaultInstagramLoginFn(fetchImpl);
-        try {
-          const outcome = await Promise.race([
-            driver({ username: input.username, password: secret }),
+        const callDriver = (args: {
+          username: string;
+          password?: string;
+          session?: string;
+        }): Promise<InstagramDriverOutcome> =>
+          Promise.race([
+            driver(args),
             new Promise<never>((_, reject) =>
               setTimeout(
                 () => reject(new Error('ig-login-timeout')),
@@ -720,17 +743,56 @@ export function createCapability(opts: CapabilityOptions = {}): Capability {
               ),
             ),
           ]);
+
+        const buildResult = (outcome: InstagramDriverOutcome): InstagramLoginResult => ({
+          ok: true,
+          username: input.username,
+          userIdPk: outcome.userIdPk,
+          sessionid: outcome.sessionid,
+          csrftoken: outcome.csrftoken,
+          session: outcome.session,
+        });
+
+        // 1 ── Session reuse first: rehydrate without touching the password.
+        if (hasSession) {
+          try {
+            const reused = await callDriver({
+              username: input.username,
+              session: input.session,
+            });
+            if (reused && reused.ok === true) {
+              return finish('ok', buildResult(reused));
+            }
+          } catch {
+            /* fall through to the password path when a secret is available */
+          }
+          if (!hasSecretId) {
+            return finish(
+              'error',
+              blocked('session expired and no secret available'),
+              'session expired and no secret available',
+            );
+          }
+        }
+
+        // 2 ── Fresh password login: RBAC-open the secret server-side; it
+        // never leaves this scope except into the driver call.
+        let secret: string;
+        try {
+          secret = await store.openSecretValue(input.caller, input.secretId!);
+        } catch {
+          return finish('denied', blocked('secret not available'));
+        }
+
+        try {
+          const outcome = await callDriver({
+            username: input.username,
+            password: secret,
+          });
           if (!outcome || outcome.ok !== true) {
             return finish('error', blocked('instagram login failed'), 'instagram login failed');
           }
-          const result: InstagramLoginResult = {
-            ok: true,
-            username: input.username,
-            userIdPk: outcome.userIdPk,
-            sessionid: outcome.sessionid,
-            csrftoken: outcome.csrftoken,
-          };
-          return finish('ok', result);
+          return finish('ok', buildResult(outcome));
         } catch {
           // Static failure text only — driver errors may echo secret-adjacent
           // context and must never surface.

@@ -478,9 +478,12 @@ const VaultHttpInput = z.object({
 );
 
 const VaultInstagramLoginInput = z.object({
-  secret_id: z.string().min(1).describe('Full secret ID holding the IG account password'),
+  secret_id: z.string().min(1).optional().describe('Full secret ID holding the IG account password (required for a fresh login; optional when session is provided for reuse)'),
   service: z.string().min(1).describe('Approval service name, e.g. "Instagram katra account"'),
   username: z.string().min(1).max(128).describe('IG account username (plaintext by design, e.g. "katra5432")'),
+  session: z.string().optional().describe('Optional previously-saved instagrapi settings JSON for session reuse — rehydrates without the password; falls back to a fresh password login (secret_id) when the session is expired'),
+}).refine((v) => v.secret_id !== undefined || v.session !== undefined, {
+  message: 'provide secret_id or session',
 });
 
 // ── F9 auth tool input schemas ──────────────────────────────────
@@ -984,7 +987,7 @@ const tools = [
   },
   {
     name: 'vault_instagram_login',
-    description: 'APPROVAL-GATED typed server-side Instagram login: the vault opens the IG account password under the caller\'s RBAC scope and hands it ONLY to the server-side instagrapi driver (which performs Instagram\'s client-encrypted login itself) — the plaintext password never enters an LLM, a request body, results, errors, logs, or audit rows. Returns derived session material only: {ok, username, userIdPk?, sessionid?, csrftoken?} or {ok: false, blocked: {reason}} (no active approval, secret not available, driver not configured, login failed). The returned sessionid/csrftoken are session credentials — treat them with the same care as the secret and never log them.',
+    description: 'APPROVAL-GATED typed server-side Instagram login (fresh login or session reuse): the vault opens the IG account password under the caller\'s RBAC scope and hands it ONLY to the server-side instagrapi driver (which performs Instagram\'s client-encrypted login itself) — the plaintext password never enters an LLM, a request body, results, errors, logs, or audit rows. A previously-saved session (instagrapi settings JSON, passed via `session`) rehydrates the client WITHOUT the password; when the session is expired the capability falls back to a fresh password login using `secret_id`. Returns session material only: {ok, username, userIdPk?, sessionid?, csrftoken?, session?} or {ok: false, blocked: {reason}} (no active approval, secret not available, session expired and no secret available, driver not configured, login failed). The returned session/sessionid/csrftoken are session credentials — treat them with the same care as the secret and never log them.',
     inputSchema: zodToJsonSchema(VaultInstagramLoginInput) as Record<string, unknown>,
   },
   // ── Katra Vault agent auth (F9) ───────────────────────────────

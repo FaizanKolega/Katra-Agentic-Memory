@@ -404,10 +404,11 @@ export const create_vault_routes = (opts: VaultRoutesOptions = {}): Hono => {
   });
 
   // POST /capability/instagram-login — approval-gated, typed server-side
-  // Instagram login ({secret_id, service, username} → session material).
-  // The vault opens the password server-side and hands it only to the
-  // instagrapi driver; the password never appears in any response, error,
-  // or audit row.
+  // Instagram login ({secret_id?, service, username, session?} → session
+  // material). Fresh logins open the password server-side and hand it only
+  // to the instagrapi driver; a saved `session` (instagrapi settings JSON)
+  // rehydrates without the password. The password never appears in any
+  // response, error, or audit row.
   router.post('/capability/instagram-login', async (c) => {
     let body: unknown;
     try {
@@ -420,30 +421,38 @@ export const create_vault_routes = (opts: VaultRoutesOptions = {}): Hono => {
     }
     const b = body as Record<string, unknown>;
     if (
-      typeof b.secret_id !== 'string' ||
       typeof b.service !== 'string' ||
       typeof b.username !== 'string'
     ) {
       return c.json(
-        { success: false, error: 'vault: secret_id, service, username are required strings' },
+        { success: false, error: 'vault: service and username are required strings' },
         400,
       );
     }
+    if (b.secret_id !== undefined && b.secret_id !== null && typeof b.secret_id !== 'string') {
+      return c.json({ success: false, error: 'vault: secret_id must be a string' }, 400);
+    }
+    if (b.session !== undefined && b.session !== null && typeof b.session !== 'string') {
+      return c.json({ success: false, error: 'vault: session must be a string' }, 400);
+    }
+    const hasSecretId = typeof b.secret_id === 'string' && b.secret_id.length > 0;
+    const hasSession = typeof b.session === 'string' && b.session.length > 0;
     if (
-      b.secret_id.length === 0 ||
       b.service.length === 0 ||
-      b.username.length === 0
+      b.username.length === 0 ||
+      (!hasSecretId && !hasSession)
     ) {
       return c.json(
-        { success: false, error: 'vault: invalid capability request' },
+        { success: false, error: 'vault: session or secret_id required' },
         400,
       );
     }
     const result = await capability.instagramLogin({
       caller: getCaller(),
-      secretId: b.secret_id,
+      secretId: hasSecretId ? (b.secret_id as string) : undefined,
       service: b.service,
       username: b.username,
+      session: hasSession ? (b.session as string) : undefined,
     });
     return c.json(result);
   });
