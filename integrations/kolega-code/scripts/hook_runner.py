@@ -91,6 +91,10 @@ async def _post_read_receipt(session_id: str) -> None:
             content=f"bulletin_received: {cfg.user_id} surfaced inter-agent messages in session {session_id[:12] or 'unknown'}",
             category="event",
             tags=["background-ack", "read-receipt", "agent-message"],
+            # Session activity receipt — PRIVATE. Shared-scope session
+            # docs leak whole session histories across agents
+            # (Zefir's wake surfaced Lilly's sessions, 2026-09-14).
+            private=True,
         )
 
 

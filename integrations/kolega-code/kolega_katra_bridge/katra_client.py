@@ -420,8 +420,15 @@ class KatraMCPClient:
         category: str = "event",
         confidence: float = 1.0,
         tags: list[str] | None = None,
+        private: bool = False,
     ) -> bool:
-        """Store a memory back to Katra — enables agent-to-agent responses."""
+        """Store a memory back to Katra — enables agent-to-agent responses.
+
+        Session-derived content (summaries, receipts) MUST pass
+        private=True: the default write scope publishes everything to the
+        shared channel, which leaked whole session histories across
+        agents (Zefir's wake surfaced Lilly's sessions, 2026-09-14).
+        Only deliberate inter-agent messages go shared."""
         args: dict[str, Any] = {
             "content": content,
             "category": category,
@@ -430,7 +437,9 @@ class KatraMCPClient:
             "source": "kolega-code",
             "tags": tags or [],
         }
-        if self.config.shared_id:
+        if private:
+            args["private"] = True
+        elif self.config.shared_id:
             args["shared_id"] = self.config.shared_id
 
         try:
