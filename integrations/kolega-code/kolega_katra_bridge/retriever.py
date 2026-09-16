@@ -256,13 +256,26 @@ class MemoryRetriever:
         names) plus the product aliases (KolegaCode/OpenCode) — the
         pre-cutover query searched only KolegaCode/OpenCode, so messages
         addressed to the new names never surfaced.
+
+        Local-identity fix (2026-09-16, Zefir): the env-derived set also
+        omitted the machine's own bridge identity (cfg.user_id), so a bridge
+        on natasha never surfaced "Attention: Zefir" mail and two Satori
+        reports sat un-surfaced. The scan now always includes the full team
+        list plus the local config identity and any operator-declared extras.
         """
-        names = {os.environ.get("KATRA_USER_ID", "katra").title()}
+        names = {"Satori", "Shoshin", "Zanshin", "Lilly", "Zefir",
+                 "KolegaCode", "KolegaCoder", "OpenCode", "OpenCoder"}
+        for candidate in (
+            (self.config.user_id or "").strip().title(),
+            os.environ.get("KATRA_USER_ID", "").strip().title(),
+        ):
+            if candidate:
+                names.add(candidate)
         for part in (os.environ.get("KATRA_EXTRA_IDENTITIES") or "").split(","):
             uid, sep, disp = part.strip().partition(":")
-            names.add((disp.strip() if sep else uid.strip()).title() or uid.strip().title())
-        for alias in ("KolegaCode", "KolegaCoder", "OpenCode", "OpenCoder"):
-            names.add(alias)
+            candidate = (disp.strip() if sep else uid.strip()).title() or uid.strip().title()
+            if candidate:
+                names.add(candidate)
         ordered = sorted(n for n in names if n)
         attention_names = [f'"Attention: {n}"' for n in ordered]
         query = " OR ".join(attention_names)

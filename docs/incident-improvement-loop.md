@@ -41,6 +41,17 @@ three minutes; skipping it is how the same class of failure recurs.
    cards and asks each agent: which CLASS recurred, and what RULE change
    would have prevented it.
 
+### INCIDENT-CARD dns-blackout-natasha (2026-09-16)
+- WHAT: natasha-macbook-pro (Zefir) lost DNS ~08:07–09:38 local 2026-09-16: `kolega-code update` failed (uv couldn't reach PyPI — reported to John as "missing dependencies") and the agent errored on model calls (tiktoken BPE download from openaipublic.blob.core.windows.net failed, [Errno 8]).
+- ROOT: link-level outage (Tailscale netcheck "UDP is blocked", derp/control dials "no route to host" by raw IP) surfaced as Tailscale's resolver 100.100.100.100 returning SERVFAIL for every query; macOS does not fail over to secondary resolvers when the primary resolver ANSWERS with SERVFAIL. Amplifier: tiktoken's BPE lived in the per-user temp dir, so a troubleshooting reboot (09:19, shutdown cause 5) forced a runtime re-download mid-outage.
+- FIX: reinstall once the link recovered (09:38, 0.39.0); TIKTOKEN_CACHE_DIR pinned to ~/.local/share/tiktoken-cache in .zprofile + .zshrc (Zefir, verified: cl100k_base loads with downloads disabled); machine-health collectors + daily review (integrations/kolega-code/health/machine_health.py every 15 min per machine, health_review.py daily on thebrick) now sample DNS resolvers + live lookups, tailscale state, bridge config and kolega install continuously.
+- CLASS: primary-resolver failure with no system failover; runtime-download caches stored in temp storage.
+- RULE: OPERATING RULE — runtime-download caches must live in persistent storage (never temp), and every machine's DNS/tailscale/bridge health must be sampled (<=15 min) and reviewed daily — health failures are found by the system, not by a human screenshot.
+- WHERE: semantic_facts "OPERATING RULE persistent-caches-health-sampling" (shared).
+- METRIC: outage ~90 min, detected only when John screenshot it; now: 15-min sampling + daily review on thebrick and natasha, and tiktoken loads with networking disabled (Zefir's proof).
+
+## Seed cards — first run (2026-09-12 → 2026-09-14)
+
 ## Seed cards — first run (2026-09-12 → 2026-09-14)
 
 ### INCIDENT-CARD wal-spiral (2026-09-14)
