@@ -67,6 +67,9 @@ MY_NAMES = {n.strip().lower() for n in
 def _configured_agents() -> set[str]:
     """All known agent names: local + KATRA_EXTRA_IDENTITIES + product aliases."""
     out = {os.environ.get("KATRA_USER_ID", "katra").lower()}
+    agent_id = os.environ.get("KATRA_AGENT_ID", "").strip().lower()
+    if agent_id:
+        out.add(agent_id)
     for part in (os.environ.get("KATRA_EXTRA_IDENTITIES") or "").split(","):
         uid = part.strip().partition(":")[0].strip().lower()
         if uid:
@@ -104,10 +107,30 @@ KOLEGA_BIN = os.path.expanduser(
 
 
 # ── Mongo access ──────────────────────────────────────────────────────────
+def _mongo_password() -> str:
+    """Resolve the mongo admin password: MONGO_PASS env → repo .env → legacy default."""
+    env_pass = os.environ.get("MONGO_PASS", "").strip()
+    if env_pass:
+        return env_pass
+    env_file = os.path.join(REPO, ".env")
+    if os.path.isfile(env_file):
+        try:
+            for raw in open(env_file, encoding="utf-8").read().splitlines():
+                line = raw.strip()
+                if line.startswith("MONGO_PASS="):
+                    # Strip inline comments + quotes, then whitespace.
+                    val = line.split("=", 1)[1].split("#", 1)[0].strip().strip('"').strip("'")
+                    if val:
+                        return val
+        except OSError:
+            pass
+    return "change-me"
+
+
 def mongo_query(js: str) -> str:
     out = subprocess.run(
         ["docker", "exec", "katra-mongo", "mongosh", "--quiet",
-         "-u", "admin", "-p", "change-me", "--authenticationDatabase", "admin",
+         "-u", "admin", "-p", _mongo_password(), "--authenticationDatabase", "admin",
          "katra", "--eval", js],
         capture_output=True, text=True, timeout=60)
     if out.returncode != 0:
