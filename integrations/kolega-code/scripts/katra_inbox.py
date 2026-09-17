@@ -64,6 +64,12 @@ MY_NAMES = {n.strip().lower() for n in
             if n.strip()}
 
 
+def _norm(name: str) -> str:
+    """Alnum-only lowercase form so 'Omen Services Manager', 'omen-services-manager'
+    and 'omenservicesmanager' compare equal."""
+    return re.sub(r"[^a-z0-9]", "", (name or "").lower())
+
+
 def _configured_agents() -> set[str]:
     """All known agent names: local + KATRA_EXTRA_IDENTITIES + product aliases."""
     out = {os.environ.get("KATRA_USER_ID", "katra").lower()}
@@ -80,9 +86,12 @@ def _configured_agents() -> set[str]:
 
 KNOWN_AGENTS = _configured_agents()
 
+# Match headers written with spaces ('Omen Services Manager'), hyphens
+# ('Omen-Services-Manager') or raw ids — all case-insensitive.
 ATTN_RE = re.compile(
     r"Attention:\s*(" +
-    "|".join(sorted((n.title() for n in KNOWN_AGENTS), key=len, reverse=True)) +
+    "|".join(sorted((n.title().replace("-", "[ -]") for n in KNOWN_AGENTS),
+                    key=len, reverse=True)) +
     ")",
     re.IGNORECASE)
 
@@ -144,7 +153,8 @@ def _js_literal(obj) -> str:
 
 def fetch_candidates() -> list[dict]:
     """All Attention-addressed shared-scope events not authored by me."""
-    names_re = "|".join(sorted((n.title() for n in KNOWN_AGENTS), key=len, reverse=True))
+    names_re = "|".join(sorted((n.title().replace("-", "[ -]") for n in KNOWN_AGENTS),
+                               key=len, reverse=True))
     js = f"""
 var rows = db.episodic_events.find({{
   shared_id: {_js_literal(SHARED_ID)},
@@ -252,7 +262,7 @@ def target_is_me(text: str) -> bool:
         if not line:
             continue
         m = ATTN_RE.match(line)
-        return bool(m) and m.group(1).lower() in MY_NAMES
+        return bool(m) and _norm(m.group(1)) in {_norm(n) for n in MY_NAMES}
     return False
 
 
